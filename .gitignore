@@ -1,0 +1,9 @@
+output/*
+!output/.gitkeep
+logs/*
+!logs/.gitkeep
+__pycache__/
+*.py[cod]
+.venv/
+.matplotlib/
+*.egg-info/

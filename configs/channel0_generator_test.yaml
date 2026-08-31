@@ -1,0 +1,41 @@
+run:
+  run_id: 1
+  mode: "channel0_generator_test"
+  output_dir: "output"
+  max_events: 10000
+  file_prefix: "caen_test"
+
+caen:
+  connection: "USB"
+  link_num: 0
+  conet_node: 0
+  vme_base_address: 0
+  firmware: "STANDARD"
+  record_length_samples: 2048
+  pre_trigger_percent: 70
+  acquisition_mode: "sw_controlled"
+  dc_offset: 32768
+  max_events_blt: 32
+
+channels:
+  n_channels: 16
+  enabled: [0]
+  polarity: "positive"
+  # Absolute 12-bit ADC code in standard firmware, not a PHA baseline offset.
+  thresholds_adc:
+    0: 2300
+
+trigger:
+  mode: "self"
+  external_trigger_enabled: false
+  software_trigger_enabled: false
+  periodic_trigger_enabled: false
+
+storage:
+  write_root: true
+  save_waveforms: true
+  compression: "zlib"
+
+monitor:
+  enabled: true
+  update_every_events: 100
