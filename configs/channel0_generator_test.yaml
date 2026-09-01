@@ -1,41 +1,64 @@
 run:
   run_id: 1
-  mode: "channel0_generator_test"
-  output_dir: "output"
+  mode: channel0_generator_test
+  output_dir: output
   max_events: 10000
-  file_prefix: "caen_test"
-
+  file_prefix: caen_test
+daq:
+  mode: full_monitor
 caen:
-  connection: "USB"
+  model: DT5740D
+  connection: USB
   link_num: 0
   conet_node: 0
   vme_base_address: 0
-  firmware: "STANDARD"
-  record_length_samples: 2048
+  firmware: STANDARD
+  record_length_samples: 1024
   pre_trigger_percent: 70
-  acquisition_mode: "sw_controlled"
+  acquisition_mode: sw_controlled
   dc_offset: 32768
   max_events_blt: 32
-
 channels:
   n_channels: 16
-  enabled: [0]
-  polarity: "positive"
-  # Absolute 12-bit ADC code in standard firmware, not a PHA baseline offset.
-  thresholds_adc:
-    0: 2300
-
+  enabled:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  polarity: positive
 trigger:
-  mode: "self"
-  external_trigger_enabled: false
-  software_trigger_enabled: false
-  periodic_trigger_enabled: false
-
+  mode: threshold
+threshold:
+  enabled: true
+  channel: 0
+  value_adc: 2100
+external:
+  enabled: false
+  input: TRG-IN
+  polarity: rising
+  save_all_enabled_channels: true
+periodic:
+  enabled: false
+  interval_s: 10.0
 storage:
   write_root: true
   save_waveforms: true
-  compression: "zlib"
-
+  compression: none
 monitor:
   enabled: true
+  draw_waveforms: false
   update_every_events: 100
+  waveform_update_interval_s: 1.0
+  rate_interval_s: 1.0

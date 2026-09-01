@@ -17,8 +17,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.max_events is not None and args.max_events <= 0:
         parser.error("--max-events должен быть больше нуля")
-    path = start_run(args.config, args.max_events)
-    print(f"ROOT-файл: {path.resolve()}")
+    start_run(args.config, args.max_events)
     return 0
 
 

@@ -23,7 +23,7 @@ def _text(value: bytes) -> str:
 
 
 class CAENDigitizer:
-    """Real DT5740 standard-waveform backend using CAENDigitizer.dll."""
+    """Real CAEN DT5740D standard-waveform backend using CAENDigitizer.dll."""
 
     def __init__(self) -> None:
         self.lib: ct.WinDLL | None = None
@@ -38,6 +38,7 @@ class CAENDigitizer:
         self._timestamp_epoch = 0
         self._last_timetag = 0
         self._polarity = "negative"
+        self._enabled_channels = [0]
 
     def _load_library(self) -> None:
         configured = os.environ.get("CAEN_DIGITIZER_DLL")
@@ -115,8 +116,9 @@ class CAENDigitizer:
             "amc_firmware": _text(bytes(info.AMC_FirmwareRel)),
             "dll": str(self.dll_path),
         }
-        if not board["model"].startswith("DT5740"):
-            raise CAENError(f"Ожидался DT5740, подключён {board['model']}")
+        expected_model = str(c.get("model", "DT5740D"))
+        if board["model"] != expected_model:
+            raise CAENError(f"Ожидался {expected_model}, подключён {board['model']}")
         return board
 
     def reset(self) -> None:
@@ -125,24 +127,37 @@ class CAENDigitizer:
     def configure(self, config: Any) -> None:
         c, channels, trigger = config.caen, config.channels, config.trigger
         self._polarity = channels["polarity"]
-        threshold = int(channels["thresholds_adc"].get(0, channels["thresholds_adc"].get("0")))
-        group_mask = 1
+        self._enabled_channels = list(channels["enabled"])
+        trigger_mode = trigger["mode"]
+        threshold = int(config.data["threshold"]["value_adc"])
+        trigger_channel = int(config.data["threshold"]["channel"])
+        trigger_group_mask = 1 << (trigger_channel // 8)
+        enabled_groups = sorted({channel // 8 for channel in self._enabled_channels})
+        group_mask = sum(1 << group for group in enabled_groups)
         self._check(self.acq_mode_fn(self.handle, CAEN_DGTZ_SW_CONTROLLED), "CAEN_DGTZ_SetAcquisitionMode")
         self._check(self.record_fn(self.handle, int(c["record_length_samples"])), "CAEN_DGTZ_SetRecordLength")
         self._check(self.post_fn(self.handle, 100 - int(c["pre_trigger_percent"])), "CAEN_DGTZ_SetPostTriggerSize")
         self._check(self.group_mask_fn(self.handle, group_mask), "CAEN_DGTZ_SetGroupEnableMask")
-        self._check(self.group_offset_fn(self.handle, 0, int(c.get("dc_offset", 32768))), "CAEN_DGTZ_SetGroupDCOffset")
-        self._check(self.threshold_fn(self.handle, 0, threshold), "CAEN_DGTZ_SetGroupTriggerThreshold")
+        for group in enabled_groups:
+            self._check(self.group_offset_fn(self.handle, group, int(c.get("dc_offset", 32768))), "CAEN_DGTZ_SetGroupDCOffset")
+        if trigger_mode == "threshold":
+            self._check(self.threshold_fn(self.handle, 0, threshold), "CAEN_DGTZ_SetGroupTriggerThreshold")
         edge = CAEN_DGTZ_TRIGGER_ON_FALLING_EDGE if self._polarity == "negative" else CAEN_DGTZ_TRIGGER_ON_RISING_EDGE
         self._check(self.polarity_fn(self.handle, 0, edge), "CAEN_DGTZ_SetTriggerPolarity")
-        self._check(self.self_trigger_fn(self.handle, CAEN_DGTZ_TRGMODE_ACQ_ONLY if trigger["mode"] == "self" else CAEN_DGTZ_TRGMODE_DISABLED, group_mask), "CAEN_DGTZ_SetGroupSelfTrigger")
-        self._check(self.sw_trigger_mode_fn(self.handle, CAEN_DGTZ_TRGMODE_ACQ_ONLY if trigger.get("software_trigger_enabled") else CAEN_DGTZ_TRGMODE_DISABLED), "CAEN_DGTZ_SetSWTriggerMode")
-        self._check(self.ext_trigger_fn(self.handle, CAEN_DGTZ_TRGMODE_ACQ_ONLY if trigger.get("external_trigger_enabled") else CAEN_DGTZ_TRGMODE_DISABLED), "CAEN_DGTZ_SetExtTriggerInputMode")
+        self._check(self.self_trigger_fn(self.handle, CAEN_DGTZ_TRGMODE_ACQ_ONLY if trigger_mode == "threshold" else CAEN_DGTZ_TRGMODE_DISABLED, trigger_group_mask), "CAEN_DGTZ_SetGroupSelfTrigger")
+        self._check(self.sw_trigger_mode_fn(self.handle, CAEN_DGTZ_TRGMODE_ACQ_ONLY if trigger_mode == "periodic" else CAEN_DGTZ_TRGMODE_DISABLED), "CAEN_DGTZ_SetSWTriggerMode")
+        self._check(self.ext_trigger_fn(self.handle, CAEN_DGTZ_TRGMODE_ACQ_ONLY if trigger_mode == "external" else CAEN_DGTZ_TRGMODE_DISABLED), "CAEN_DGTZ_SetExtTriggerInputMode")
         self._check(self.io_level_fn(self.handle, CAEN_DGTZ_IOLEVEL_NIM), "CAEN_DGTZ_SetIOLevel")
         self._check(self.max_blt_fn(self.handle, int(c.get("max_events_blt", 32))), "CAEN_DGTZ_SetMaxNumEventsBLT")
         self._check(self.malloc_buffer_fn(self.handle, ct.byref(self.buffer), ct.byref(self.buffer_size)), "CAEN_DGTZ_MallocReadoutBuffer")
         self._check(self.allocate_event_fn(self.handle, ct.byref(self.event_ptr)), "CAEN_DGTZ_AllocateEvent")
         self._check(self.clear_fn(self.handle), "CAEN_DGTZ_ClearData")
+
+        if trigger_mode == "external":
+            LOG.warning(
+                "TRG-IN configured; external polarity '%s' requires validation on the real DT5740D",
+                config.data["external"]["polarity"],
+            )
 
     def start(self) -> None:
         self._check(self.start_fn(self.handle), "CAEN_DGTZ_SWStartAcquisition")
@@ -161,16 +176,33 @@ class CAENDigitizer:
             self._check(self.event_info_fn(self.handle, self.buffer, actual, index, ct.byref(info), ct.byref(raw_event)), "CAEN_DGTZ_GetEventInfo")
             self._check(self.decode_fn(self.handle, raw_event, ct.byref(self.event_ptr)), "CAEN_DGTZ_DecodeEvent")
             decoded = ct.cast(self.event_ptr, ct.POINTER(Uint16Event)).contents
-            size = int(decoded.ChSize[0])
-            if size and decoded.DataChannel[0]:
-                samples = np.ctypeslib.as_array(decoded.DataChannel[0], shape=(size,)).copy()
-                timetag = int(info.TriggerTimeTag)
-                if timetag < self._last_timetag:
-                    self._timestamp_epoch += 1 << 32
-                self._last_timetag = timetag
-                result.append(Event(self._event_id, 0, self._timestamp_epoch + timetag, samples, 1, self._polarity))
-                self._event_id += 1
+            timetag = int(info.TriggerTimeTag)
+            if timetag < self._last_timetag:
+                self._timestamp_epoch += 1 << 32
+            self._last_timetag = timetag
+            timestamp = self._timestamp_epoch + timetag
+            for channel in self._enabled_channels:
+                size = int(decoded.ChSize[channel])
+                if size and decoded.DataChannel[channel]:
+                    samples = np.ctypeslib.as_array(decoded.DataChannel[channel], shape=(size,)).copy()
+                    result.append(Event(self._event_id, channel, timestamp, samples, 1))
+            self._event_id += 1
         return result
+
+    def send_software_trigger(self) -> None:
+        if not self.is_running:
+            raise CAENError("Software trigger requested while acquisition is stopped")
+        self._check(self.send_trigger_fn(self.handle), "CAEN_DGTZ_SendSWtrigger")
+
+    def set_threshold(self, channel: int, value_adc: int) -> None:
+        if channel != 0:
+            raise CAENError("TelescopeDAQ v0.1 поддерживает threshold только канала 0")
+        if not 0 <= value_adc <= 4095:
+            raise ValueError("Threshold должен быть в диапазоне 0..4095 ADC")
+        self._check(self.threshold_fn(self.handle, 0, value_adc), "CAEN_DGTZ_SetGroupTriggerThreshold")
+
+    def clear_data(self) -> None:
+        self._check(self.clear_fn(self.handle), "CAEN_DGTZ_ClearData")
 
     def stop(self) -> None:
         if self.is_running:

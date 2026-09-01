@@ -3,4 +3,4 @@ awkward>=2.6
 uproot>=5.4
 pyyaml>=6.0
 matplotlib>=3.9
-rich>=13.9
+psutil>=6.0

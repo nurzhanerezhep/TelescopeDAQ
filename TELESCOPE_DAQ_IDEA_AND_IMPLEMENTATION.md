@@ -44,7 +44,7 @@ TelescopeDAQ — программное обеспечение DAQ-компью�
 2. Загрузка установленной `CAENDigitizer.dll`.
 3. Открытие DT5740D по USB и чтение информации о плате.
 4. Сброс и настройка digitizer.
-5. Настройка канала 0 и аппаратного self-trigger.
+5. Настройка канала 0 и выбранного threshold, external или periodic trigger.
 6. Выделение буферов CAEN и запуск acquisition.
 7. Чтение и декодирование событий.
 8. Расчёт baseline, amplitude и charge.
@@ -164,6 +164,16 @@ output/run_000001_config.yaml
 - amplitude;
 - charge;
 - приблизительный размер ROOT-файла.
+
+Графический monitor поддерживает три режима. `Full Monitor` получает копию
+последнего события каждой пачки и обновляет waveform и online-статистику.
+`Write Only` получает только компактные status snapshots и не вызывает waveform
+callback, поэтому ROOT Writer работает без затрат на графику. `ROOT Viewer`
+читает уже записанный файл в отдельном worker-потоке и не блокирует acquisition.
+
+Доступны три источника trigger: threshold канала 0, внешний TRG-IN и periodic
+software trigger. Настройка TRG-IN реализована структурно; polarity внешнего
+входа требует проверки на реальном DT5740D со standard firmware.
 
 ### Безопасное завершение
 
@@ -358,7 +368,10 @@ output/run_000001_waveforms_ch0.png
 | `record_length_samples` | Запрошенная длина waveform |
 | `pre_trigger_percent` | Доля samples до момента триггера |
 | `dc_offset` | 16-битный групповой DAC offset |
-| `thresholds_adc.0` | Абсолютный 12-битный порог канала 0 |
+| `threshold.value_adc` | Абсолютный 12-битный порог канала 0 |
+| `daq.mode` | `full_monitor`, `write_only` или `root_viewer` |
+| `trigger.mode` | `threshold`, `external` или `periodic` |
+| `periodic.interval_s` | Период software trigger в секундах |
 | `polarity` | `positive` или `negative` |
 | `max_events` | Максимальное число событий run |
 | `update_every_events` | Период обновления online monitor |
@@ -371,8 +384,7 @@ output/run_000001_waveforms_ch0.png
 - Статистика rate, baseline и amplitude отдельно по каждому каналу.
 - Coincidence/multiplicity trigger.
 - Настраиваемое окно совпадений.
-- Внешний триггер.
-- Периодический программный триггер.
+- Аппаратная проверка polarity внешнего TRG-IN.
 - Контроль переполнений и потерянных событий.
 - Ротация ROOT-файлов по размеру или времени.
 - Расширенная run metadata.
