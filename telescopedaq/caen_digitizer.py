@@ -10,6 +10,7 @@ import numpy as np
 
 from .caen_constants import *  # constants mirror the installed C header
 from .event import Event
+from .triggers import configure_triggers, TRIGGER_CODES
 
 LOG = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class CAENDigitizer:
         self._last_timetag = 0
         self._polarity = "negative"
         self._enabled_channels = [0]
+        self._trigger_type = 1
 
     def _load_library(self) -> None:
         configured = os.environ.get("CAEN_DIGITIZER_DLL")
@@ -82,6 +84,8 @@ class CAENDigitizer:
         self.self_trigger_fn = self._fn("SetGroupSelfTrigger", cint, cint, u32)
         self.sw_trigger_mode_fn = self._fn("SetSWTriggerMode", cint, cint)
         self.ext_trigger_fn = self._fn("SetExtTriggerInputMode", cint, cint)
+        self.get_ext_trigger_fn = self._fn("GetExtTriggerInputMode", cint, ct.POINTER(cint))
+        self.get_io_level_fn = self._fn("GetIOLevel", cint, ct.POINTER(cint))
         self.io_level_fn = self._fn("SetIOLevel", cint, cint)
         self.max_blt_fn = self._fn("SetMaxNumEventsBLT", cint, u32)
         self.clear_fn = self._fn("ClearData", cint)
@@ -119,6 +123,7 @@ class CAENDigitizer:
         expected_model = str(c.get("model", "DT5740D"))
         if board["model"] != expected_model:
             raise CAENError(f"Ожидался {expected_model}, подключён {board['model']}")
+        self.board_info = board
         return board
 
     def reset(self) -> None:
@@ -129,9 +134,8 @@ class CAENDigitizer:
         self._polarity = channels["polarity"]
         self._enabled_channels = list(channels["enabled"])
         trigger_mode = trigger["mode"]
+        self._trigger_type = TRIGGER_CODES[trigger_mode]
         threshold = int(config.data["threshold"]["value_adc"])
-        trigger_channel = int(config.data["threshold"]["channel"])
-        trigger_group_mask = 1 << (trigger_channel // 8)
         enabled_groups = sorted({channel // 8 for channel in self._enabled_channels})
         group_mask = sum(1 << group for group in enabled_groups)
         self._check(self.acq_mode_fn(self.handle, CAEN_DGTZ_SW_CONTROLLED), "CAEN_DGTZ_SetAcquisitionMode")
@@ -144,20 +148,14 @@ class CAENDigitizer:
             self._check(self.threshold_fn(self.handle, 0, threshold), "CAEN_DGTZ_SetGroupTriggerThreshold")
         edge = CAEN_DGTZ_TRIGGER_ON_FALLING_EDGE if self._polarity == "negative" else CAEN_DGTZ_TRIGGER_ON_RISING_EDGE
         self._check(self.polarity_fn(self.handle, 0, edge), "CAEN_DGTZ_SetTriggerPolarity")
-        self._check(self.self_trigger_fn(self.handle, CAEN_DGTZ_TRGMODE_ACQ_ONLY if trigger_mode == "threshold" else CAEN_DGTZ_TRGMODE_DISABLED, trigger_group_mask), "CAEN_DGTZ_SetGroupSelfTrigger")
-        self._check(self.sw_trigger_mode_fn(self.handle, CAEN_DGTZ_TRGMODE_ACQ_ONLY if trigger_mode == "periodic" else CAEN_DGTZ_TRGMODE_DISABLED), "CAEN_DGTZ_SetSWTriggerMode")
-        self._check(self.ext_trigger_fn(self.handle, CAEN_DGTZ_TRGMODE_ACQ_ONLY if trigger_mode == "external" else CAEN_DGTZ_TRGMODE_DISABLED), "CAEN_DGTZ_SetExtTriggerInputMode")
-        self._check(self.io_level_fn(self.handle, CAEN_DGTZ_IOLEVEL_NIM), "CAEN_DGTZ_SetIOLevel")
+        configure_triggers(self, config)
         self._check(self.max_blt_fn(self.handle, int(c.get("max_events_blt", 32))), "CAEN_DGTZ_SetMaxNumEventsBLT")
         self._check(self.malloc_buffer_fn(self.handle, ct.byref(self.buffer), ct.byref(self.buffer_size)), "CAEN_DGTZ_MallocReadoutBuffer")
         self._check(self.allocate_event_fn(self.handle, ct.byref(self.event_ptr)), "CAEN_DGTZ_AllocateEvent")
         self._check(self.clear_fn(self.handle), "CAEN_DGTZ_ClearData")
 
         if trigger_mode == "external":
-            LOG.warning(
-                "TRG-IN configured; external polarity '%s' requires validation on the real DT5740D",
-                config.data["external"]["polarity"],
-            )
+            LOG.info("TRG-IN configured and read back: leading edge, %s", config.data["external"].get("io_level", "NIM"))
 
     def start(self) -> None:
         self._check(self.start_fn(self.handle), "CAEN_DGTZ_SWStartAcquisition")
@@ -185,7 +183,7 @@ class CAENDigitizer:
                 size = int(decoded.ChSize[channel])
                 if size and decoded.DataChannel[channel]:
                     samples = np.ctypeslib.as_array(decoded.DataChannel[channel], shape=(size,)).copy()
-                    result.append(Event(self._event_id, channel, timestamp, samples, 1))
+                    result.append(Event(self._event_id, channel, timestamp, samples, self._trigger_type))
             self._event_id += 1
         return result
 
@@ -218,12 +216,17 @@ class CAENDigitizer:
         if self.event_ptr.value:
             code = self.free_event_fn(self.handle, ct.byref(self.event_ptr))
             if code != 0: errors.append(CAENError(f"CAEN_DGTZ_FreeEvent: {code}"))
-        if self.buffer.value:
+        if ct.cast(self.buffer, ct.c_void_p).value:
             code = self.free_buffer_fn(ct.byref(self.buffer))
             if code != 0: errors.append(CAENError(f"CAEN_DGTZ_FreeReadoutBuffer: {code}"))
         if self.is_open:
             code = self.close_fn(self.handle)
             self.is_open = False
             if code != 0: errors.append(CAENError(f"CAEN_DGTZ_CloseDigitizer: {code}"))
+        self.event_ptr = ct.c_void_p()
+        self.buffer = ct.c_char_p()
+        self.is_running = False
         for error in errors:
             LOG.error("Ошибка закрытия CAEN: %s", error)
+        if errors:
+            raise errors[0]

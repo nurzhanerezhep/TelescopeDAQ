@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-import msvcrt
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
 
 
 def stop_key_pressed() -> bool:
+    if msvcrt is None:
+        return False
     while msvcrt.kbhit():
         key = msvcrt.getwch()
         if key in {"\r", "\n", "\x1b"}:

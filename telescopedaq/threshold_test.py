@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -53,13 +54,14 @@ def run_threshold_scan(
     max_events_per_point: int,
     stop_event: threading.Event,
     progress_sink: Callable[[ThresholdScanProgress], None],
+    digitizer=None,
 ) -> ThresholdScanProgress:
     values = threshold_values(lower_adc, upper_adc, step_adc)
-    if dwell_s <= 0 or max_events_per_point <= 0:
+    if not math.isfinite(dwell_s) or dwell_s <= 0 or max_events_per_point <= 0:
         raise ValueError("Dwell time и max events per point должны быть больше нуля")
     if config.trigger["mode"] != "threshold":
         raise ValueError("Threshold scan требует trigger.mode: threshold")
-    digitizer = CAENDigitizer()
+    digitizer = digitizer or CAENDigitizer()
     thresholds: list[int] = []
     counts: list[int] = []
     rates: list[float] = []
@@ -67,7 +69,7 @@ def run_threshold_scan(
     current = values[0]
     try:
         config.data["threshold"]["value_adc"] = current
-        board = digitizer.open(config)
+        board = digitizer.board_info if getattr(digitizer, "is_open", False) else digitizer.open(config)
         LOG.info("Threshold scan connected: %s", board)
         digitizer.reset(); digitizer.configure(config)
         for current in values:

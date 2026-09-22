@@ -107,6 +107,16 @@ class AcquisitionModeTests(unittest.TestCase):
             assert FakeDigitizer.latest is not None
             self.assertGreaterEqual(FakeDigitizer.latest.sent_triggers, 1)
 
+    def test_failed_display_consumer_does_not_stop_root_recording(self):
+        def broken(events):
+            raise RuntimeError("Display unavailable")
+        with tempfile.TemporaryDirectory(dir=".") as temporary:
+            config = self._config(Path(temporary), "full_monitor")
+            with patch("telescopedaq.acquisition.CAENDigitizer", FakeDigitizer):
+                with self.assertLogs("telescopedaq.acquisition", level="ERROR"):
+                    path = Acquisition(config, event_sink=broken, status_sink=broken).run()
+            self.assertEqual(load_root_summary(path).count, 3)
+
     def test_invalid_monitor_interval_is_rejected(self) -> None:
         original = load_config("configs/channel0_generator_test.yaml")
         data = copy.deepcopy(original.data)

@@ -7,3 +7,6 @@ __pycache__/
 .venv/
 .matplotlib/
 *.egg-info/
+artifacts/
+build/
+dist/

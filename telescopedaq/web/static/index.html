@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TelescopeDAQ | Acquisition Control</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/static/vendor/uPlot.min.css" />
+    <link rel="stylesheet" href="/static/app.css" />
+    <script defer src="/static/vendor/uPlot.iife.min.js"></script>
+    <script defer src="/static/vendor/lucide.min.js"></script>
+    <script defer src="/static/charts.js"></script>
+    <script defer src="/static/app.js"></script>
+  </head>
+  <body>
+    <aside class="sidebar">
+      <a class="brand" href="/"
+        ><span class="brand-icon"><i data-lucide="activity"></i></span
+        ><span>TelescopeDAQ<small>ACQUISITION CONTROL</small></span></a
+      >
+      <div class="instrument">
+        <span class="overline">DIGITIZER</span><strong>CAEN DT5740D</strong
+        ><span>USB · STANDARD firmware</span>
+      </div>
+      <nav aria-label="Views">
+        <button data-view="run" class="nav-button active">
+          <i data-lucide="layout-dashboard"></i>Run Control
+        </button>
+        <button data-view="wave" class="nav-button">
+          <i data-lucide="activity"></i>Online Waveform
+        </button>
+        <button data-view="stats" class="nav-button">
+          <i data-lucide="chart-no-axes-combined"></i>Run Statistics
+        </button>
+        <button data-view="viewer" class="nav-button">
+          <i data-lucide="folder-open"></i>ROOT Viewer
+        </button>
+        <button data-view="settings" class="nav-button">
+          <i data-lucide="sliders-horizontal"></i>Settings
+        </button>
+        <button data-view="logs" class="nav-button">
+          <i data-lucide="scroll-text"></i>Logs
+        </button>
+      </nav>
+      <div class="sidebar-bottom">
+        <span class="dot" id="api-dot"></span
+        ><span id="api-status">Connecting to server</span
+        ><small>v0.3 · LOCAL WORKSTATION</small>
+      </div>
+    </aside>
+    <main>
+      <header>
+        <div>
+          <span class="overline">WORKSPACE / TELESCOPE</span>
+          <h1 id="view-title">Run Control</h1>
+        </div>
+        <div class="header-meta">
+          <span id="demo" hidden>DEMO · SIMULATED DATA</span
+          ><span id="state" class="state">Disconnected</span
+          ><time id="clock"></time>
+        </div>
+      </header>
+      <div id="error" class="error-banner" role="alert" hidden>
+        <span></span
+        ><button
+          id="dismiss-error"
+          title="Dismiss error"
+          aria-label="Dismiss error"
+        >
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div class="command-bar">
+        <label
+          >DAQ Mode<select id="daq-mode">
+            <option value="write_only">Write Only</option>
+            <option value="full_monitor">Full Monitor</option>
+            <option value="root_viewer">ROOT Viewer</option>
+          </select></label
+        >
+        <label
+          >Trigger Mode<select id="trigger-mode">
+            <option value="threshold">Threshold</option>
+            <option value="external">External / TRG-IN</option>
+            <option value="periodic">Periodic</option>
+          </select></label
+        >
+        <div class="connection-actions">
+          <button id="connect"><i data-lucide="plug"></i>Connect</button
+          ><button
+            id="disconnect"
+            title="Disconnect CAEN"
+            aria-label="Disconnect CAEN"
+          >
+            <i data-lucide="unplug"></i></button
+          ><button
+            data-view="settings"
+            title="Configure"
+            aria-label="Configure"
+          >
+            <i data-lucide="settings-2"></i>
+          </button>
+        </div>
+        <div class="run-actions">
+          <button id="start" class="primary">
+            <i data-lucide="play"></i>Start Run</button
+          ><button id="stop"><i data-lucide="square"></i>Stop</button
+          ><button id="emergency" class="danger" title="Emergency Stop">
+            <i data-lucide="octagon-x"></i>Emergency Stop
+          </button>
+        </div>
+      </div>
+
+      <section id="view-run" class="view">
+        <div class="section-heading">
+          <h2>Run <span id="run-id">000001</span></h2>
+          <span id="run-output" class="mono muted">No active output</span>
+        </div>
+        <div class="metric-strip">
+          <div><span>Accepted events</span><strong id="total">0</strong></div>
+          <div>
+            <span>Events / <span id="interval">1 s</span></span
+            ><strong id="interval-events" class="green">0</strong>
+          </div>
+          <div>
+            <span>Written waveforms</span><strong id="written">0</strong>
+          </div>
+          <div><span>Elapsed</span><strong id="elapsed">00:00:00</strong></div>
+          <div><span>ROOT size</span><strong id="file-size">0 B</strong></div>
+          <div><span>Disk free</span><strong id="disk-free">--</strong></div>
+        </div>
+        <div class="run-progress">
+          <progress id="run-progress" max="100" value="0"></progress
+          ><span id="progress-label">Ready</span>
+        </div>
+        <div class="overview-grid">
+          <div id="run-chart-section">
+            <div class="section-heading">
+              <h2>Accepted events</h2>
+              <span class="muted">Last 30 minutes</span>
+            </div>
+            <div
+              id="run-chart"
+              class="chart"
+              aria-label="Accepted events over time"
+            ></div>
+          </div>
+          <div class="board-status">
+            <div class="section-heading">
+              <h2>Instrument status</h2>
+              <i data-lucide="cpu"></i>
+            </div>
+            <dl>
+              <dt>Model</dt>
+              <dd id="board-model">DT5740D</dd>
+              <dt>Serial number</dt>
+              <dd id="serial">--</dd>
+              <dt>Firmware</dt>
+              <dd id="firmware">--</dd>
+              <dt>ADC resolution</dt>
+              <dd id="adc">12 bit</dd>
+              <dt>Last timestamp</dt>
+              <dd id="timestamp" class="mono">--</dd>
+              <dt>CAEN errors</dt>
+              <dd id="caen-errors">0</dd>
+              <dt>Trigger source</dt>
+              <dd id="trigger-source">Threshold</dd>
+            </dl>
+            <button id="open-scan">
+              <i data-lucide="scan-line"></i>Threshold Scan
+            </button>
+          </div>
+        </div>
+        <div id="channels-section">
+          <div class="section-heading">
+            <h2>Channels Overview</h2>
+            <span id="channel-count" class="muted">16 enabled</span>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Channel</th>
+                  <th>Group</th>
+                  <th>Recording</th>
+                  <th>Samples</th>
+                  <th>Latest event ID</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="channels-table"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="section-heading">
+          <h2>Recent log</h2>
+          <button data-view="logs" class="text-button">
+            All logs<i data-lucide="arrow-right"></i>
+          </button>
+        </div>
+        <pre id="recent-log" class="log-preview">Waiting for an operation</pre>
+      </section>
+
+      <section id="view-wave" class="view" hidden>
+        <div class="section-heading">
+          <h2>Online Waveform</h2>
+          <div class="inline-controls">
+            <label class="checkbox"
+              ><input id="autoscale" type="checkbox" checked />Auto scale</label
+            ><label class="checkbox"
+              ><input
+                id="threshold-line"
+                type="checkbox"
+                checked
+              />Threshold</label
+            ><button id="wave-pause" title="Pause display">
+              <i data-lucide="pause"></i><span>Pause display</span></button
+            ><button
+              id="export-wave"
+              title="Export waveform PNG"
+              aria-label="Export waveform PNG"
+            >
+              <i data-lucide="download"></i>
+            </button>
+          </div>
+        </div>
+        <div
+          class="channel-picker"
+          id="channel-picker"
+          aria-label="Displayed channels"
+        ></div>
+        <div class="display-status">
+          <span id="display-state">Waiting for waveform</span
+          ><span id="display-holdoff">Display sampled · 1 s</span
+          ><span>ROOT: all accepted events</span>
+        </div>
+        <div
+          id="wave-chart"
+          class="chart tall"
+          aria-label="Online waveform ADC samples"
+        ></div>
+        <p id="wave-metadata" class="mono muted"></p>
+      </section>
+
+      <section id="view-stats" class="view" hidden>
+        <div class="section-heading">
+          <h2>Accepted events per interval</h2>
+          <span id="stats-interval" class="muted"></span>
+        </div>
+        <div id="stats-chart" class="chart tall"></div>
+      </section>
+
+      <section id="view-viewer" class="view" hidden>
+        <div class="section-heading">
+          <h2>Recorded ROOT files</h2>
+          <div class="inline-controls">
+            <button
+              id="refresh-files"
+              title="Refresh files"
+              aria-label="Refresh files"
+            >
+              <i data-lucide="refresh-cw"></i></button
+            ><label class="file-button"
+              ><i data-lucide="upload"></i>Upload ROOT<input
+                id="root-upload"
+                type="file"
+                accept=".root"
+                hidden
+            /></label>
+          </div>
+        </div>
+        <div class="viewer-toolbar">
+          <select id="root-files" aria-label="ROOT file">
+            <option value="">Select a ROOT file</option></select
+          ><button id="load-root"><i data-lucide="folder-open"></i>Open</button
+          ><a id="download-root" class="button" hidden
+            ><i data-lucide="download"></i>Download</a
+          >
+        </div>
+        <div id="viewer-progress" hidden>
+          <progress></progress><span id="viewer-task">Loading ROOT</span>
+        </div>
+        <div class="viewer-toolbar">
+          <button
+            id="previous"
+            title="Previous waveform"
+            aria-label="Previous waveform"
+          >
+            <i data-lucide="chevron-left"></i></button
+          ><label
+            >Entry<input
+              id="root-entry"
+              type="number"
+              value="0"
+              min="0"
+              step="1" /></label
+          ><button id="next" title="Next waveform" aria-label="Next waveform">
+            <i data-lucide="chevron-right"></i></button
+          ><button id="show-entry">Show</button
+          ><span id="root-info" class="muted">No file opened</span>
+        </div>
+        <div id="offline-wave" class="chart tall"></div>
+        <p id="offline-metadata" class="mono muted"></p>
+        <div class="section-heading">
+          <h2>Physical events / timestamp bin</h2>
+        </div>
+        <div id="offline-rate" class="chart"></div>
+      </section>
+
+      <section id="view-settings" class="view" hidden>
+        <div class="section-heading">
+          <h2>Acquisition settings</h2>
+          <div class="inline-controls">
+            <a
+              href="/api/config/download"
+              class="button"
+              title="Download YAML"
+              aria-label="Download YAML"
+              ><i data-lucide="download"></i></a
+            ><label class="file-button"
+              ><i data-lucide="upload"></i>Import YAML<input
+                id="yaml-upload"
+                type="file"
+                accept=".yaml,.yml"
+                hidden /></label
+            ><button id="reload-settings">
+              <i data-lucide="rotate-ccw"></i>Reload</button
+            ><button id="save-settings" class="primary">
+              <i data-lucide="save"></i>Save YAML
+            </button>
+          </div>
+        </div>
+        <p id="settings-status" role="status" class="muted">Loading settings</p>
+        <form id="settings-form" class="settings-grid"></form>
+      </section>
+
+      <section id="view-logs" class="view" hidden>
+        <div class="section-heading">
+          <h2>Event log</h2>
+          <div class="inline-controls">
+            <select id="log-level" aria-label="Log level">
+              <option value="all">All levels</option>
+              <option value="WARNING">Warnings & errors</option>
+              <option value="ERROR">Errors only</option></select
+            ><button
+              id="export-logs"
+              title="Export logs"
+              aria-label="Export logs"
+            >
+              <i data-lucide="download"></i>
+            </button>
+          </div>
+        </div>
+        <div id="logs" class="log-list" role="log"></div>
+      </section>
+      <footer>
+        <span>CAEN DT5740D · USB · Raw waveform acquisition</span
+        ><span id="footer-status">Ready</span>
+      </footer>
+    </main>
+    <dialog id="scan-dialog">
+      <div class="section-heading">
+        <h2>Threshold Scan · ch0</h2>
+        <button id="close-scan" title="Close scan" aria-label="Close scan">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <form id="scan-form" class="scan-fields">
+        <label
+          >Lower, ADC<input
+            name="lower"
+            type="number"
+            value="1800"
+            min="0"
+            max="4095"
+            required /></label
+        ><label
+          >Upper, ADC<input
+            name="upper"
+            type="number"
+            value="2600"
+            min="0"
+            max="4095"
+            required /></label
+        ><label
+          >Step, ADC<input
+            name="step"
+            type="number"
+            value="100"
+            min="1"
+            max="4095"
+            required /></label
+        ><label
+          >Time / point, s<input
+            name="dwell_s"
+            type="number"
+            value="1"
+            min="0.05"
+            max="60"
+            step="0.05"
+            required /></label
+        ><label
+          >Max events / point<input
+            name="max_events"
+            type="number"
+            value="100000"
+            min="1"
+            max="10000000"
+            required /></label
+        ><button type="submit" id="scan-start" class="primary">
+          <i data-lucide="play"></i>Start Scan</button
+        ><button type="button" id="scan-stop">
+          <i data-lucide="square"></i>Stop
+        </button>
+      </form>
+      <div class="run-progress">
+        <progress id="scan-progress" value="0" max="100"></progress
+        ><span id="scan-status">Ready · ROOT recording off</span>
+      </div>
+      <div id="scan-chart" class="chart"></div>
+      <div class="inline-controls">
+        <label
+          >Selected threshold, ADC<input
+            id="selected-threshold"
+            type="number"
+            value="2100"
+            min="0"
+            max="4095" /></label
+        ><button id="use-threshold">Use in Settings</button
+        ><button id="export-scan" title="Export CSV">
+          <i data-lucide="download"></i>CSV
+        </button>
+      </div>
+    </dialog>
+  </body>
+</html>

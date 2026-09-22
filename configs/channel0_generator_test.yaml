@@ -47,6 +47,7 @@ threshold:
 external:
   enabled: false
   input: TRG-IN
+  io_level: NIM
   polarity: rising
   save_all_enabled_channels: true
 periodic:

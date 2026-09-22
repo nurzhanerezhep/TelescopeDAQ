@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import awkward as ak
 import numpy as np
 import uproot
 
@@ -18,18 +17,32 @@ def main() -> int:
         print("Число entries:", tree.num_entries)
         if tree.num_entries == 0:
             return 0
-        arrays = tree.arrays(["event_id", "channel", "timestamp", "baseline", "amplitude", "charge", "waveform"])
-        lengths = ak.to_numpy(ak.num(arrays.waveform))
-        print("Каналы:", np.unique(ak.to_numpy(arrays.channel)).tolist())
+        channels, first, last, triggers, previous = set(), None, None, 0, None
+        # Stream metadata; load samples only for the first five waveform entries.
+        for batch in tree.iterate(
+            ["event_id", "channel", "timestamp"], step_size="8 MB", library="np"
+        ):
+            channels.update(np.unique(batch["channel"]).tolist())
+            ids = batch["event_id"]
+            if ids.size:
+                triggers += int(ids[0] != previous) + int(
+                    np.count_nonzero(ids[1:] != ids[:-1])
+                )
+                previous = int(ids[-1])
+                low, high = int(batch["timestamp"].min()), int(batch["timestamp"].max())
+                first = low if first is None else min(first, low)
+                last = high if last is None else max(last, high)
+        print("Каналы:", sorted(channels))
+        print("Physical events:", triggers)
+        print(f"Timestamp min/max (raw ticks): {first} / {last}")
+        arrays = tree.arrays(
+            ["event_id", "channel", "timestamp", "trigger_type", "waveform"],
+            entry_stop=5,
+        )
         print("Первые 5 событий:")
         for row in arrays[:5].to_list():
             row["waveform"] = f"{len(row['waveform'])} samples"
             print(row)
-        timestamps = ak.to_numpy(arrays.timestamp)
-        amplitudes = ak.to_numpy(arrays.amplitude)
-        print(f"Timestamp min/max: {timestamps.min()} / {timestamps.max()}")
-        print(f"Waveform length min/max/mean: {lengths.min()} / {lengths.max()} / {lengths.mean():.1f}")
-        print(f"Amplitude min/max/mean: {amplitudes.min():.2f} / {amplitudes.max():.2f} / {amplitudes.mean():.2f}")
     return 0
 
 

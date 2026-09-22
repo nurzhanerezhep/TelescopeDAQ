@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -44,9 +45,23 @@ def load_config(
         raise FileNotFoundError(f"Конфигурация не найдена: {source}")
     with source.open("r", encoding="utf-8") as stream:
         data = yaml.safe_load(stream)
+    return validate_config(data, source, daq_mode, trigger_mode)
+
+
+def validate_config(
+    data: dict[str, Any],
+    source: str | Path,
+    daq_mode: str | None = None,
+    trigger_mode: str | None = None,
+) -> DAQConfig:
+    """Validate a private snapshot without touching the YAML or hardware."""
+    source = Path(source).resolve()
     if not isinstance(data, dict):
         raise ValueError("Корень YAML должен быть отображением")
     data = copy.deepcopy(data)
+    for section, value in data.items():
+        if not isinstance(value, dict):
+            raise ValueError(f"{section} must be a mapping")
     if daq_mode is not None:
         data.setdefault("daq", {})["mode"] = daq_mode
         data.setdefault("monitor", {})["draw_waveforms"] = daq_mode == "full_monitor"
@@ -55,26 +70,95 @@ def load_config(
         for section in ("threshold", "external", "periodic"):
             data.setdefault(section, {})["enabled"] = section == trigger_mode
     required = {
-        "run", "daq", "caen", "channels", "trigger", "threshold",
-        "external", "periodic", "storage", "monitor",
+        "run",
+        "daq",
+        "caen",
+        "channels",
+        "trigger",
+        "threshold",
+        "external",
+        "periodic",
+        "storage",
+        "monitor",
     }
     missing = sorted(required - data.keys())
     if missing:
         raise ValueError(f"В YAML отсутствуют разделы: {', '.join(missing)}")
+    for section in required:
+        if not isinstance(data[section], dict):
+            raise ValueError(f"{section} must be a mapping")
+    integer_fields = {
+        "run": ("run_id", "max_events"),
+        "caen": (
+            "link_num",
+            "conet_node",
+            "vme_base_address",
+            "record_length_samples",
+            "pre_trigger_percent",
+            "dc_offset",
+            "max_events_blt",
+        ),
+        "channels": ("n_channels",),
+        "threshold": ("channel", "value_adc"),
+        "monitor": ("update_every_events",),
+    }
+    for section, keys in integer_fields.items():
+        for key in keys:
+            if type(data[section].get(key)) is not int:
+                raise ValueError(f"{section}.{key} must be an integer")
+    for section, keys in {
+        "threshold": ("enabled",),
+        "external": ("enabled", "save_all_enabled_channels"),
+        "periodic": ("enabled",),
+        "storage": ("write_root", "save_waveforms"),
+        "monitor": ("enabled", "draw_waveforms"),
+    }.items():
+        for key in keys:
+            if type(data[section].get(key)) is not bool:
+                raise ValueError(f"{section}.{key} must be true or false")
+    for section, key, default in (
+        ("periodic", "interval_s", 10.0),
+        ("monitor", "rate_interval_s", 1.0),
+        ("monitor", "waveform_update_interval_s", 1.0),
+    ):
+        value = data[section].get(key, default)
+        if type(value) not in (float, int) or not math.isfinite(value):
+            raise ValueError(f"{section}.{key} must be a finite number")
+        data[section][key] = float(value)
+    data["external"].setdefault("io_level", "NIM")
+    if data["external"]["io_level"] not in ("NIM", "TTL"):
+        raise ValueError("external.io_level must be NIM or TTL")
     enabled = data["channels"].get("enabled", [])
-    if not isinstance(enabled, list) or not enabled or any(not isinstance(channel, int) or not 0 <= channel < 16 for channel in enabled) or len(set(enabled)) != len(enabled):
+    if (
+        not isinstance(enabled, list)
+        or not enabled
+        or any(type(channel) is not int or not 0 <= channel < 16 for channel in enabled)
+        or len(set(enabled)) != len(enabled)
+    ):
         raise ValueError("channels.enabled должен содержать уникальные каналы 0..15")
-    if data["caen"].get("firmware", "STANDARD").upper() != "STANDARD":
+    if data["caen"].get("firmware", "STANDARD") != "STANDARD":
         raise ValueError("DT5740D v0.1 требует firmware: STANDARD")
     if data["caen"].get("model") != "DT5740D":
         raise ValueError("TelescopeDAQ поддерживает только caen.model: DT5740D")
     if data["caen"].get("connection") != "USB":
         raise ValueError("CAEN DT5740D должен использовать caen.connection: USB")
-    if int(data["run"].get("run_id", -1)) < 0 or int(data["run"].get("max_events", 0)) <= 0:
+    if (
+        int(data["run"].get("run_id", -1)) < 0
+        or int(data["run"].get("max_events", 0)) <= 0
+    ):
         raise ValueError("run_id должен быть >= 0, max_events должен быть > 0")
-    if not str(data["run"].get("output_dir", "")).strip():
+    if (
+        not isinstance(data["run"].get("output_dir"), str)
+        or not data["run"]["output_dir"].strip()
+    ):
         raise ValueError("run.output_dir не должен быть пустым")
+    if not isinstance(data["run"].get("mode"), str) or not data["run"]["mode"].strip():
+        raise ValueError("run.mode must be a non-empty run label")
     caen = data["caen"]
+    if caen.get("acquisition_mode") != "sw_controlled":
+        raise ValueError("caen.acquisition_mode must be sw_controlled")
+    if not 0 <= caen["vme_base_address"] <= 0xFFFFFFFF:
+        raise ValueError("caen.vme_base_address must fit uint32")
     if int(caen.get("link_num", -1)) < 0 or int(caen.get("conet_node", -1)) < 0:
         raise ValueError("caen.link_num и caen.conet_node должны быть >= 0")
     if not 1 <= int(caen.get("record_length_samples", 0)) <= 196608:
@@ -92,42 +176,76 @@ def load_config(
         raise ValueError("CAEN DT5740D должен иметь channels.n_channels: 16")
     daq_mode = str(data["daq"].get("mode", ""))
     if daq_mode not in {"full_monitor", "write_only", "root_viewer"}:
-        raise ValueError("daq.mode должен быть full_monitor, write_only или root_viewer")
+        raise ValueError(
+            "daq.mode должен быть full_monitor, write_only или root_viewer"
+        )
     trigger_mode = str(data["trigger"].get("mode", ""))
     if trigger_mode not in {"threshold", "external", "periodic"}:
         raise ValueError("trigger.mode должен быть threshold, external или periodic")
     threshold_value = int(data["threshold"].get("value_adc", -1))
-    if int(data["threshold"].get("channel", -1)) != 0 or not 0 <= threshold_value <= 4095:
+    if (
+        int(data["threshold"].get("channel", -1)) != 0
+        or not 0 <= threshold_value <= 4095
+    ):
         raise ValueError("threshold требует channel: 0 и value_adc в диапазоне 0..4095")
     external = data["external"]
-    if external.get("input") != "TRG-IN" or external.get("polarity") not in {"rising", "falling"}:
+    if external.get("input") != "TRG-IN" or external.get("polarity") not in {
+        "rising",
+        "falling",
+    }:
         raise ValueError("external требует input: TRG-IN и polarity rising/falling")
+    if external["polarity"] != "rising":
+        raise ValueError(
+            "DT5740D TRG-IN supports leading edge only in this application"
+        )
+    if not external["save_all_enabled_channels"]:
+        raise ValueError("External trigger requires save_all_enabled_channels: true")
     if float(data["periodic"].get("interval_s", 0)) <= 0:
         raise ValueError("periodic.interval_s должен быть > 0")
     if trigger_mode == "threshold":
+        if 0 not in enabled:
+            raise ValueError("Threshold trigger requires channel 0 in channels.enabled")
         threshold = data["threshold"]
         if not threshold.get("enabled"):
             raise ValueError("threshold.enabled должен быть true для threshold trigger")
         if int(threshold.get("channel", -1)) != 0:
-            raise ValueError("TelescopeDAQ v0.1 поддерживает threshold только для канала 0")
+            raise ValueError(
+                "TelescopeDAQ v0.1 поддерживает threshold только для канала 0"
+            )
     elif trigger_mode == "external":
+        if external["polarity"] != "rising":
+            raise ValueError(
+                "DT5740D STANDARD supports TRG-IN leading edge only; falling is not implemented"
+            )
+        if not external["save_all_enabled_channels"]:
+            raise ValueError(
+                "External trigger requires save_all_enabled_channels: true"
+            )
         external = data["external"]
         if not external.get("enabled") or external.get("input") != "TRG-IN":
-            raise ValueError("Для external trigger задайте enabled: true и input: TRG-IN")
+            raise ValueError(
+                "Для external trigger задайте enabled: true и input: TRG-IN"
+            )
     else:
         periodic = data["periodic"]
         if not periodic.get("enabled") or float(periodic.get("interval_s", 0)) <= 0:
-            raise ValueError("Для periodic trigger задайте enabled: true и interval_s > 0")
+            raise ValueError(
+                "Для periodic trigger задайте enabled: true и interval_s > 0"
+            )
     storage = data["storage"]
     if not storage.get("write_root") or not storage.get("save_waveforms"):
-        raise ValueError("Текущая версия требует storage.write_root/save_waveforms: true")
+        raise ValueError(
+            "Текущая версия требует storage.write_root/save_waveforms: true"
+        )
     if str(storage.get("compression", "")).lower() not in {"zlib", "none"}:
         raise ValueError("storage.compression должен быть zlib или none")
     if int(data["monitor"].get("update_every_events", 0)) <= 0:
         raise ValueError("monitor.update_every_events должен быть > 0")
     waveform_interval = float(data["monitor"].get("waveform_update_interval_s", 1.0))
     if not 0.05 <= waveform_interval <= 60.0:
-        raise ValueError("monitor.waveform_update_interval_s должен быть в диапазоне 0.05..60 s")
+        raise ValueError(
+            "monitor.waveform_update_interval_s должен быть в диапазоне 0.05..60 s"
+        )
     rate_interval = float(data["monitor"].get("rate_interval_s", 1.0))
     if not 0.1 <= rate_interval <= 3600.0:
         raise ValueError("monitor.rate_interval_s должен быть в диапазоне 0.1..3600 s")

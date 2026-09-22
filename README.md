@@ -1,151 +1,149 @@
-# TelescopeDAQ v0.2
+# TelescopeDAQ v0.3
 
-Поддерживаемая модель digitizer: **CAEN DT5740D**, USB, standard waveform
-firmware. При подключении другой модели запуск блокируется до конфигурации платы.
+Локальное веб-приложение **FastAPI + HTML/JavaScript** для сбора raw waveform
+с **CAEN DT5740D**, USB, STANDARD waveform firmware. Запускается из терминала,
+управляется в браузере. CLI и прежний Tkinter GUI сохранены.
 
-TelescopeDAQ регистрирует осциллограммы телескопа на реальном CAEN DT5740D,
-подключённом по USB, и сохраняет события в ROOT через `uproot`.
+## Быстрый запуск
 
-## Важное ограничение оборудования
-
-DT5740D не поддерживает DPP-PHA. Установленная плата сейчас работает с
-waveform/standard firmware `4.29/0.13`. Поэтому текущая версия использует стандартный
-waveform API CAENDigitizer, а не PHA. Для x740D альтернативой является DPP-QDC.
-
-## Установка
-
-Нужны 64-bit Python и установленные CAEN USB Driver и CAENDigitizer Library.
-Проверенная DLL находится по адресу:
-
-```text
-C:\Program Files\CAEN\Digitizers\WaveDump\bin\CAENDigitizer.dll
-```
-
-Если DLL расположена иначе, задайте `CAEN_DIGITIZER_DLL` полным путём. В Linux
-понадобится адаптировать загрузчик и проверить `LD_LIBRARY_PATH`.
+Нужны Python 3.10+ x64, CAEN USB Driver и CAENDigitizer Library.
+Закройте WaveDump, CoMPASS и другие программы, владеющие прибором.
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe scripts/start_web.py
 ```
 
-Перед запуском закройте WaveDump, CoMPASS и другие программы, использующие USB.
-
-## Запуск
+Откройте **http://127.0.0.1:8000**. Если порт занят, программа выбирает следующий
+свободный из 20 портов и пишет точный адрес в лог терминала.
+Подключение к CAEN происходит только по Connect или Start Run, не при открытии страницы.
 
 ```powershell
-python scripts/start_run.py --config configs/channel0_generator_test.yaml
+# Другой конфиг и начальный порт
+.\.venv\Scripts\python.exe scripts/start_web.py --config configs/channel0_generator_test.yaml --port 8010
+
+# Проверка интерфейса без оборудования
+.\.venv\Scripts\python.exe scripts/start_web.py --demo
 ```
 
-Остановка безопасна по `Ctrl+C`, `Enter` или `Esc`: acquisition останавливается,
-буферы CAEN освобождаются, ROOT-файл и USB-соединение закрываются.
+DEMO отмечен в интерфейсе и пишет синтетические данные только в `output/demo/`.
+Это явный отдельный режим: ошибки настоящего CAEN не подменяются симуляцией.
+DEMO External не генерирует импульсы и не подтверждает работу TRG-IN.
 
-Короткий проверочный запуск:
+DLL ищется в установке CAEN, включая
+`C:\Program Files\CAEN\Digitizers\WaveDump\bin\CAENDigitizer.dll`.
+Можно задать полный путь в `CAEN_DIGITIZER_DLL`.
+Реальный backend рассчитан на Windows; перенос драйверного загрузчика на Linux не выполнен.
+
+## Что реализовано
+
+- **Full Monitor**: ROOT-запись, статус, график числа событий в интервале за последние
+  30 минут, отдельная вкладка Online Waveform с выбором нескольких каналов.
+- **Write Only**: тот же формат и путь записи ROOT, без подготовки online waveform
+  и обновления online-графиков. Предпочтительный режим длительной регистрации.
+- **ROOT Viewer**: ранее закрытые файлы, выбранная waveform-запись, распределение
+  физических событий по относительному аппаратному timestamp. Работает во время
+  другого run; текущий записываемый файл открыть нельзя.
+- **Settings**: проверка типов, диапазонов и сочетаний параметров в браузере и на
+  сервере, импорт/экспорт YAML, атомарное сохранение, защита от устаревшей вкладки.
+- **Threshold Scan**: нижний/верхний порог, шаг, время и лимит событий на точку;
+  график `threshold ADC -> количество срабатываний`, выбор порога, CSV.
+- Connect/Disconnect, Start/Stop, Emergency Stop, прогресс run/scan/upload и Logs.
+
+Baseline, amplitude и charge намеренно не вычисляются, не отображаются и не
+сохраняются. Этот выбор из предыдущей версии сохранён.
+
+## Триггеры
+
+| Режим | Реализация |
+| --- | --- |
+| Threshold | Self-trigger группы 0; trigger mask оставляет ch0. Порог абсолютный, 0..4095 ADC |
+| External | TRG-IN, NIM/TTL, ведущий фронт, сохранение всех включённых каналов; self/software trigger отключены |
+| Periodic | Software trigger с периодом `periodic.interval_s`, планирование по монотонным часам |
+
+External теперь вызывает CAEN API и сверяет режим/логический уровень обратным
+чтением. Обратный фронт и `save_all_enabled_channels: false` отклоняются явно.
+**Физическая проверка новой веб-версии и TRG-IN на подключённом DT5740D не выполнена.**
+Для стендовой проверки сначала согласуйте уровень NIM/TTL и электрические параметры
+генератора с руководством прибора. Periodic не является real-time таймером.
+
+## Данные и счётчики
+
+Результат: `output/run_000001.root` и `output/run_000001_config.yaml`.
+Повторный запуск с тем же Run ID блокируется: существующие данные не перезаписываются.
+
+Дерево `events`: `event_id:uint64`, `channel:uint16`, `timestamp:uint64`,
+`trigger_type:uint16`, `waveform:var * uint16`. Uproot также создаёт счётчик
+`nwaveform`. Коды источников: 1 Threshold, 2 External, 3 Periodic.
+
+Один физический trigger имеет общий `event_id` для waveform всех выбранных каналов.
+Например, 100 triggers по 16 каналам дают 1600 waveform-записей:
+**Accepted events = 100, Written waveforms = 1600**.
+Скорость считается по реально прочитанным событиям, не по заданным 100 кГц генератора.
+
+`monitor.rate_interval_s` задаёт скользящее окно подсчёта.
+`monitor.waveform_update_interval_s` задаёт паузу между отображаемыми кадрами,
+не между записываемыми событиями. В браузере показано `Display sampled`.
+Короткие пики сохраняются при экранном прореживании; ROOT получает полный waveform.
+
+Текущая программная конфигурация обслуживает каналы **0..15**.
+Параметры DC offset и threshold аппаратно групповые, не независимые для каждого
+канала. При шаге отсчёта 16 ns текущие 1024 samples дают окно 16.384 us.
+Предел валидатора 196608 samples соответствует 3.145728 ms; доступная длина и
+округление зависят от firmware/организации памяти и требуют проверки на приборе.
+Единицы waveform samples нельзя автоматически переносить на TriggerTimeTag:
+ROOT Viewer показывает сырые timestamp ticks без неподтверждённого пересчёта в секунды.
+
+## Эксплуатация
+
+Один процесс сервера владеет CAEN. Не используйте Uvicorn reload/multiple workers
+и не запускайте параллельно аппаратные CLI/Tk GUI.
+Несколько вкладок браузера видят один и тот же run. Изменения Settings и scan
+во время записи блокируются сервером.
+
+Закрытие браузера **не останавливает запись**. Stop завершает цикл и закрывает ROOT.
+Emergency Stop выставляет тот же флаг остановки без ожидания пользователя, но не
+прерывает зависший вызов DLL и не заменяет аппаратную защиту.
+Для завершения сервера используйте Ctrl+C в его терминале.
+
+Терминал содержит logging, без дампов waveform и HTTP access-log каждого опроса.
+Файл `logs/web.log` ротируется по 10 MiB, сохраняются пять архивов.
+Интерфейс хранит последние 1000 сообщений.
+
+Это локальная лабораторная панель: только loopback, без авторизации для внешней
+сети. Не публикуйте её в Интернет и не меняйте bind на `0.0.0.0`.
+
+## CLI и прежний GUI
 
 ```powershell
 python scripts/start_run.py --config configs/channel0_generator_test.yaml --max-events 10
-```
-
-Результаты: `output/run_000001.root` и копия YAML рядом с ним.
-
-## Графический online monitor
-
-```powershell
 python scripts/start_gui.py --config configs/channel0_generator_test.yaml
+python scripts/inspect_root.py output/run_000001.root
+python scripts/plot_waveforms.py output/run_000001.root
 ```
 
-GUI содержит три режима:
+Для каждого нового run сначала задайте незанятый Run ID.
 
-- `Full Monitor` — запись ROOT, online waveform и event rate;
-- `Write Only` — запись того же ROOT без передачи waveform в GUI и без перерисовки графиков;
-- `ROOT Viewer` — независимый просмотр записанного файла, waveform выбранной записи
-  и rate vs time.
-
-`Full Monitor` содержит компактный dashboard, rolling rate и таблицу 16 каналов.
-Waveform отображается только на отдельной вкладке `Online Waveform`, где можно
-выбрать один или несколько каналов. Аппаратный backend записывает все выбранные
-каналы `0..15`; один trigger получает общий `event_id` во всех channel-waveform.
-Отдельная вкладка
-`Settings` редактирует и валидирует параметры
-Run, CAEN DT5740D, Channels, Trigger, Storage и Monitor. Сохранение YAML
-выполняется атомарно через проверенный временный файл.
-Ошибочные значения сразу подсвечиваются; Save, Connect и Start остаются
-заблокированными до исправления всех полей.
-
-Для DT5740D `record_length_samples` допускается до `196608` отсчётов на канал.
-При периоде дискретизации `16 ns` это соответствует максимальному окну
-`3.145728 ms`; текущее значение `2048` задаёт окно `32.768 µs`.
-
-GUI перерисовывает только открытую вкладку, хранит только свежие online-кадры и
-ограничивает историю лога. Отбрасывание устаревшей экранной копии не влияет на
-acquisition и независимую запись всех событий в ROOT.
-
-`monitor.waveform_update_interval_s` задаёт display holdoff от `0.05` до `60 s`.
-За этот период GUI не рисует промежуточные события и при следующем обновлении
-показывает самый свежий waveform. Во вкладке явно указано `ROOT: all events`:
-прореживание относится только к экрану и не создаёт аппаратное dead time.
-
-`monitor.rate_interval_s` (`0.1..3600 s`) задаёт окно подсчёта принятых событий.
-GUI показывает `N events / interval`: значение `1` даёт события в секунду,
-`60` — события за минуту. Это статистика событий DAQ, а не частота генератора.
-ROOT Writer объединяет мелкие пачки до 1024 waveform или 16 MiB. Для высоких
-частот рекомендуется `compression: none`, чтобы ZLIB не ограничивал acquisition.
-
-Кнопка `Threshold Test` открывает отдельное окно сканирования порога канала 0.
-Пользователь задаёт нижнюю и верхнюю границы, шаг, время измерения и максимум
-событий на точку. Результат строится как график `threshold ADC -> количество
-срабатываний`; выбранную на графике точку можно перенести в `Settings`.
-Тест показывает waveform и число событий, не создаёт
-ROOT и не может работать одновременно с основным acquisition. Проверенный порог
-можно перенести в Settings без автоматической записи YAML.
-
-Терминал, файл `logs/run_NNNNNN.log` и вкладка `Logs` используют единый Python
-logging. Отдельные `print` и консольные таблицы не выводятся.
-
-Верхняя панель позволяет проверить доступность CAEN, проверить конфигурацию,
-запустить и штатно либо аварийно остановить run. В `Write Only` показываются
-run ID, elapsed time, total/written events, события за интервал, размер ROOT, свободное
-место, последний timestamp и число ошибок CAEN. Этот режим рекомендуется для
-длительной регистрации.
-
-Поддерживаются `threshold`, `external` и `periodic` trigger. Параметры берутся
-из YAML. Настройка TRG-IN реализована для standard firmware, но polarity внешнего
-входа должна быть проверена на реальном DT5740D. Текущий конфиг записывает
-каналы `0..15`, а threshold trigger формируется группой канала 0.
-
-## Проверка и график
+## Проверка
 
 ```powershell
-python scripts/inspect_root.py output/run_000001.root
-python scripts/plot_waveforms.py output/run_000001.root --channel 0 --n 20
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe tests/browser_smoke.py --browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 ```
 
-График сохраняется как `output/run_000001_waveforms_ch0.png`.
+Browser smoke использует временную папку и только синтетический источник.
+Скриншоты сохраняются в `artifacts/`, не включаются в Git.
+Для другого Chromium укажите его executable; без `--browser` требуется
+установленный через Playwright Chromium.
 
-## Настройки YAML
+## Документация
 
-- `record_length_samples` — длина осциллограммы;
-- `pre_trigger_percent` — доля данных перед триггером;
-- `thresholds_adc.0` — **абсолютный** 12-битный код порога standard firmware;
-- `polarity` — `negative` или `positive`;
-- `dc_offset` — групповой 16-битный DAC offset;
-- `max_events` — число событий.
+- [Полное описание программы](TELESCOPE_DAQ_PROGRAM_DESCRIPTION.md).
+- [Пошаговый пользовательский мануал](docs/WEB_USER_MANUAL.md).
+- [Разбор миграции, архитектура и ограничения](docs/MIGRATION_ANALYSIS.md).
+- [Первоначальная идея проекта](TELESCOPE_DAQ_IDEA_AND_IMPLEMENTATION.md), исторический документ.
 
-У x740 параметры offset, threshold и trigger polarity общие для группы из восьми
-каналов. Для текущего генератора используется положительный
-импульс до 4021 ADC, поэтому в тестовом YAML установлен rising threshold 2100.
-
-## Использованные функции CAENDigitizer
-
-Backend вызывает функции из установленного `CAENDigitizer.h`: `OpenDigitizer`,
-`GetInfo`, `Reset`, `SetRecordLength`, `SetPostTriggerSize`, `SetGroupEnableMask`,
-`SetGroupDCOffset`, `SetGroupTriggerThreshold`, `SetTriggerPolarity`,
-`SetGroupSelfTrigger`, `MallocReadoutBuffer`, `AllocateEvent`, `ReadData`,
-`GetNumEvents`, `GetEventInfo`, `DecodeEvent`, `SWStartAcquisition`,
-`SWStopAcquisition`, `FreeEvent`, `FreeReadoutBuffer` и `CloseDigitizer`.
-
-## Дальнейшее развитие
-
-Планируются coincidence, аппаратные счётчики lost trigger/buffer occupancy и,
-при переходе платы на соответствующую прошивку, отдельный backend DPP-QDC.
+Графики uPlot и иконки Lucide поставляются локально, CDN и Интернет для интерфейса
+не нужны. Их лицензии лежат в `telescopedaq/web/static/vendor/`.
