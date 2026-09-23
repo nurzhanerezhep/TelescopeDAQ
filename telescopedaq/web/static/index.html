@@ -55,6 +55,10 @@
           <h1 id="view-title">Run Control</h1>
         </div>
         <div class="header-meta">
+          <span id="access-mode" hidden>LAN / read only</span>
+          <button id="safe-exit" title="Safely stop acquisition and exit">
+            <i data-lucide="log-out"></i>Safe Exit
+          </button>
           <span id="demo" hidden>DEMO · SIMULATED DATA</span
           ><span id="state" class="state">Disconnected</span
           ><time id="clock"></time>
@@ -358,6 +362,20 @@
         ><span id="footer-status">Ready</span>
       </footer>
     </main>
+    <dialog id="exit-dialog" aria-labelledby="exit-title">
+      <div class="section-heading"><h2 id="exit-title">Stop and exit?</h2></div>
+      <p id="exit-status" role="status">
+        The active run will stop. Buffered ROOT data will be written and CAEN
+        disconnected.
+      </p>
+      <progress id="exit-progress" hidden></progress>
+      <div class="inline-controls">
+        <button id="cancel-exit">Cancel</button>
+        <button id="confirm-exit" class="primary">
+          <i data-lucide="log-out"></i>Stop &amp; Exit
+        </button>
+      </div>
+    </dialog>
     <dialog id="scan-dialog">
       <div class="section-heading">
         <h2>Threshold Scan · ch0</h2>

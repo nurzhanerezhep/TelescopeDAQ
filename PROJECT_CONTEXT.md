@@ -16,20 +16,23 @@
 
 ## Scope
 
-Проект описан в `README.md` как TelescopeDAQ v0.2 для регистрации осциллограмм телескопа на реальном CAEN DT5740D, подключенном по USB, с сохранением событий в ROOT через `uproot`.
+Проект описан в `README.md` как TelescopeDAQ v0.3 для регистрации осциллограмм телескопа на CAEN DT5740D, подключенном по USB, с сохранением событий в ROOT через `uproot`. Основной интерфейс: FastAPI + HTML; CLI и прежний Tk GUI сохранены. Это описание кода, а не подтверждение аппаратного теста текущих изменений.
 
 ## Confirmed local structure
 
 - `telescopedaq/config.py` - загрузка и проверка YAML-конфигурации.
 - `telescopedaq/caen_constants.py` - constants and `ctypes` structures for CAEN API.
 - `telescopedaq/caen_digitizer.py` - управление DT5740D and event decoding.
-- `telescopedaq/event.py` - модель события и расчет параметров импульса.
+- `telescopedaq/event.py` - модель raw waveform-события; baseline, amplitude и charge не вычисляются и не хранятся.
 - `telescopedaq/acquisition.py` - основной acquisition loop and status publishing.
 - `telescopedaq/root_writer.py` - запись ROOT дерева `events`.
 - `telescopedaq/monitor.py` - compact console monitor.
 - `telescopedaq/gui.py` - graphical online monitor and settings UI.
 - `telescopedaq/root_viewer.py` - independent ROOT file viewer.
 - `telescopedaq/run_control.py` - run preparation, logging and acquisition startup.
+- `telescopedaq/web/` - FastAPI handlers, single CAEN-owner worker, LAN read-only policy, offline analysis and HTML/JS interface.
+- `scripts/start_web.py` - web startup; optional `--demo` and `--lan`.
+- `scripts/build_user_manual.py` - illustrated PDF generation from unchanged source screenshots.
 - `scripts/start_run.py` - DAQ run without GUI.
 - `scripts/start_gui.py` - GUI startup.
 - `scripts/inspect_root.py` - ROOT file inspection.
@@ -39,6 +42,10 @@
 - `logs/.gitkeep`, `output/.gitkeep` - placeholders for local run logs and output directories.
 
 ## Confirmed workflows
+
+- Web interface (local control): `python scripts/start_web.py`. Optional `--lan` permits read-only viewers from private IPv4 networks; the launcher prints their URL. No authentication/TLS: trusted networks only, no reverse proxy or Internet exposure.
+- `Stop` finalizes the run but leaves the web server available. `Safe Exit` confirms the request, blocks new commands, waits for ROOT/CAEN cleanup, then terminates the launcher-managed server. Cleanup failure leaves Logs available. Closing a browser tab does not stop acquisition.
+- Updated workflow and verification details: `STATUS.md`, `docs/WEB_USER_MANUAL.md` and `docs/TelescopeDAQ_User_Manual.pdf` (2026-09-23).
 
 - Setup is documented for Python virtual environment and dependencies from `requirements.txt`.
 - CAEN USB Driver and CAENDigitizer Library are required for hardware acquisition.

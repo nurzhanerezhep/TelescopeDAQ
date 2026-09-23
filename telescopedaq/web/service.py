@@ -70,6 +70,8 @@ def waveform_payload(event, max_points=2048):
 class MemoryLog(logging.Handler):
     def __init__(self, service):
         super().__init__()
+        # emit already uses service.lock; a second handler lock inverts lock ordering.
+        self.lock = service.lock
         self.service = service
 
     def emit(self, record):
@@ -101,6 +103,11 @@ class DAQService:
         self.future = None
         self.busy = False
         self.closed = False
+        self.shutdown_future = None
+        self.shutdown_state = None
+        self.shutdown_error = None
+        self.close_lock = threading.Lock()
+        self.executor_closed = False
         self.device = None
         self.stop_event = threading.Event()
         self.state = "disconnected"
@@ -153,7 +160,7 @@ class DAQService:
         config = validate_config(data, self.config_path)
         self.local_path(config.run["output_dir"])
         with self.lock:
-            if self.busy:
+            if self.busy or self.closed:
                 raise BusyError("Stop the current operation before changing Settings")
             if self.device is not None and any(
                 config.caen[key] != self.config.caen[key]
@@ -199,7 +206,10 @@ class DAQService:
         try:
             work()
             with self.lock:
-                self.state = "connected" if self.device is not None else "disconnected"
+                if not self.closed:
+                    self.state = (
+                        "connected" if self.device is not None else "disconnected"
+                    )
         except Exception as exc:
             LOG.exception("%s failed", operation)
             try:
@@ -209,6 +219,8 @@ class DAQService:
             with self.lock:
                 self.error = str(exc)
                 self.state = "error"
+                if self.closed:
+                    self.shutdown_error = str(exc)
         finally:
             with self.lock:
                 self.active_path = None
@@ -305,7 +317,11 @@ class DAQService:
                 None if status.last_timestamp is None else str(status.last_timestamp)
             )
             self.history.append([time.time(), status.interval_events])
-            if status.state == "running" and self.state != "stopping":
+            if (
+                status.state == "running"
+                and self.state != "stopping"
+                and not self.closed
+            ):
                 self.state = "running"
         if status.state != "running":
             LOG.info(
@@ -385,6 +401,9 @@ class DAQService:
                 "state": self.state,
                 "operation": self.operation,
                 "busy": self.busy,
+                "closed": self.closed,
+                "shutdown_state": self.shutdown_state,
+                "shutdown_error": self.shutdown_error,
                 "connected": self.device is not None,
                 "demo": self.demo,
                 "board": self.board,
@@ -400,10 +419,44 @@ class DAQService:
                 "output": self.last_output,
             }
 
-    def close(self):
+    def request_shutdown(self):
+        """Block new work immediately; finish acquisition and cleanup on its owner thread."""
         with self.lock:
+            if self.shutdown_future is not None:
+                return self.shutdown_future
             self.closed = True
+            self.state = "shutting_down"
+            self.shutdown_state = "stopping"
             self.stop_event.set()
-        self.executor.submit(self._close_device)
-        self.executor.shutdown(wait=True)
-        logging.getLogger("telescopedaq").removeHandler(self.handler)
+            self.shutdown_future = self.executor.submit(self._finish_shutdown)
+            LOG.info(
+                "Safe exit requested; waiting for ROOT finalization and CAEN cleanup"
+            )
+            return self.shutdown_future
+
+    def _finish_shutdown(self):
+        # Queued after the active job, whose finally block closes the ROOT writer.
+        try:
+            self._close_device()
+        except Exception as exc:
+            LOG.exception("Safe exit: CAEN cleanup failed")
+            with self.lock:
+                self.shutdown_error = str(exc)
+        with self.lock:
+            self.shutdown_state = "error" if self.shutdown_error else "ready"
+            self.state = "shutdown_error" if self.shutdown_error else "closed"
+        if self.shutdown_error:
+            LOG.error("Safe exit could not be confirmed: %s", self.shutdown_error)
+        else:
+            LOG.info(
+                "Safe exit ready: acquisition finished, ROOT closed, CAEN released"
+            )
+
+    def close(self):
+        with self.close_lock:
+            if self.executor_closed:
+                return
+            self.request_shutdown().result()
+            self.executor.shutdown(wait=True)
+            self.executor_closed = True
+            logging.getLogger("telescopedaq").removeHandler(self.handler)

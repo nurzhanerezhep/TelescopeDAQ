@@ -4,6 +4,17 @@
 
 ## Entries
 
+### 2026-09-23 - Safe web exit, LAN viewing and illustrated manual
+
+- Context: requested safe application shutdown, viewing from other PCs on the same network and an annotated manual using six PNG screenshots in `docs`.
+- Implementation: idempotent confirmed shutdown queued after the active CAEN-owner job; ROOT finalization precedes server exit. Failed cleanup remains visible in Logs. Shared logging/service lock avoids inverted lock ordering.
+- Network: opt-in `--lan`, private IPv4 viewing only; nonlocal write requests are rejected regardless of forwarded headers. Localhost retains control. Windows Firewall rules were not changed.
+- Documentation: README, full program description and Markdown manual updated. A 12-page Russian PDF adds numbered arrows and explanations without modifying original screenshots; its source builder and optional document dependencies are included.
+- Verification: 30 automated unit tests passed; Edge/Playwright browser smoke passed with synthetic events, 16-channel ROOT recording, waveform rendering (45,013 painted pixels), independent viewer, Write Only, scan, uploads, mobile layout, read-only UI, and Safe Exit while recording. The finalized demo ROOT reopened successfully. Ruff F checks passed. All 12 PDF pages were rendered and visually checked.
+- Limits: no physical CAEN run, TRG-IN validation or real two-PC LAN/firewall test in this update. Screenshots show a disconnected instrument and are not hardware measurements. No force-kill of a blocked driver is attempted; accepted data are finalized, unread device memory is not guaranteed to be drained.
+- Git: new changes remain local; commit/push requires a separate explicit request. Historical import records below are retained.
+- Next checks: operator-approved CAEN shutdown test and LAN access from a second trusted computer.
+
 ### 2026-09-07 - Research HQ tracking files added
 
 ```text

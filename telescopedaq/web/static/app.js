@@ -16,6 +16,8 @@ let waves = [],
   rootPath = "",
   rootSummary = null,
   pending = false;
+let exiting = false,
+  exitReady = false;
 let lastError = "",
   validationTimer = null,
   validationSequence = 0,
@@ -132,6 +134,42 @@ $("start").onclick = () =>
   });
 $("stop").onclick = () => command("/run/stop");
 $("emergency").onclick = () => command("/run/emergency");
+$("safe-exit").onclick = () => {
+  $("exit-status").textContent = dirty
+    ? "Unsaved Settings will be discarded. Stop the run, write buffered ROOT data and exit?"
+    : "The active run will stop. Buffered ROOT data will be written and CAEN disconnected.";
+  $("exit-dialog").showModal();
+};
+$("cancel-exit").onclick = () => $("exit-dialog").close();
+$("exit-dialog").addEventListener("cancel", (event) => {
+  if (exiting) event.preventDefault();
+});
+$("confirm-exit").onclick = async () => {
+  exiting = true;
+  $("confirm-exit").disabled = true;
+  $("cancel-exit").disabled = true;
+  $("exit-progress").hidden = false;
+  $("exit-status").textContent =
+    "Stopping acquisition and closing ROOT. Waiting for CAEN cleanup...";
+  updateButtons();
+  try {
+    await api("/shutdown", "POST", { confirmation: "stop_and_exit" });
+    await pollState();
+  } catch (e) {
+    $("exit-status").textContent = "Exit not confirmed: " + e.message;
+    exiting = false;
+    $("confirm-exit").disabled = false;
+    $("exit-progress").hidden = true;
+    $("cancel-exit").disabled = false;
+    updateButtons();
+  }
+};
+window.addEventListener("beforeunload", (event) => {
+  if (!exitReady && (snapshot.busy || dirty)) {
+    event.preventDefault();
+    event.returnValue = "";
+  }
+});
 $("daq-mode").onchange = () => {
   if ($("daq-mode").value === "root_viewer") setView("viewer");
   updateButtons();
@@ -140,7 +178,19 @@ $("daq-mode").onchange = () => {
 $("trigger-mode").onchange = () => updateButtons();
 
 function updateButtons() {
-  const busy = snapshot.busy || pending;
+  const busy =
+    snapshot.busy ||
+    pending ||
+    snapshot.closed ||
+    exiting ||
+    snapshot.read_only;
+  $("safe-exit").disabled = !!(
+    exiting ||
+    snapshot.closed ||
+    snapshot.read_only
+  );
+  for (const id of ["yaml-upload", "root-upload", "use-threshold"])
+    $(id).disabled = !!(snapshot.read_only || snapshot.closed);
   for (const id of [
     "connect",
     "disconnect",
@@ -156,10 +206,17 @@ function updateButtons() {
   const canStop =
     snapshot.busy &&
     ["acquiring", "scanning"].includes(snapshot.operation) &&
-    !stopping;
+    !stopping &&
+    !snapshot.closed &&
+    !exiting &&
+    !snapshot.read_only;
   $("stop").disabled = !canStop;
   $("emergency").disabled = !canStop;
-  $("scan-stop").disabled = snapshot.operation !== "scanning" || stopping;
+  $("scan-stop").disabled =
+    snapshot.operation !== "scanning" ||
+    stopping ||
+    snapshot.closed ||
+    snapshot.read_only;
   $("scan-start").disabled = busy || dirty;
   $("save-settings").disabled = busy || !dirty || !settingsValid;
   $("settings-form")
@@ -168,6 +225,33 @@ function updateButtons() {
 }
 
 function renderState() {
+  $("access-mode").hidden = !snapshot.read_only;
+  if (snapshot.read_only && snapshot.run_config) {
+    $("daq-mode").value = snapshot.run_config.daq.mode;
+    $("trigger-mode").value = snapshot.run_config.trigger.mode;
+  }
+  if (snapshot.shutdown_state) {
+    exiting = true;
+    if (!$("exit-dialog").open && snapshot.shutdown_state !== "error")
+      $("exit-dialog").showModal();
+    $("confirm-exit").disabled = true;
+    $("cancel-exit").disabled = snapshot.shutdown_state === "stopping";
+    $("exit-progress").hidden = snapshot.shutdown_state !== "stopping";
+    if (snapshot.shutdown_state === "ready") {
+      exitReady = true;
+      $("exit-title").textContent = "DAQ safely closed";
+      $("exit-status").textContent =
+        "Files closed. CAEN released. The server is shutting down; you can close this tab.";
+    } else if (snapshot.shutdown_state === "error") {
+      $("exit-status").textContent =
+        "Safe exit could not be confirmed: " +
+        snapshot.shutdown_error +
+        ". Server remains available for Logs.";
+    } else {
+      $("exit-status").textContent =
+        "Stopping acquisition and closing ROOT. Waiting for CAEN cleanup...";
+    }
+  }
   const s = snapshot.status || {},
     b = snapshot.board || {};
   $("state").textContent = snapshot.state || "Disconnected";
@@ -870,9 +954,14 @@ async function poll() {
     $("api-status").textContent = "Server connected";
     $("api-dot").classList.add("online");
   } catch (e) {
-    $("api-status").textContent = "Server unavailable";
+    $("api-status").textContent = exitReady
+      ? "Server stopped"
+      : "Server unavailable";
     $("api-dot").classList.remove("online");
-    $("footer-status").textContent = e.message;
+    $("footer-status").textContent = exitReady
+      ? "Safe exit complete"
+      : e.message;
+    if (exitReady) return;
   }
   $("clock").textContent = new Date().toLocaleTimeString("ru-RU");
   setTimeout(poll, 500);

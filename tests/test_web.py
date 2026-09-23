@@ -4,6 +4,7 @@ import copy
 import ctypes as ct
 import tempfile
 import time
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -48,6 +49,145 @@ class WebTests(unittest.TestCase):
                 return state
             time.sleep(0.01)
         self.fail("Worker did not finish")
+
+    def test_safe_exit_requires_confirmation_and_is_idempotent(self):
+        self.assertEqual(self.client.post("/api/shutdown", json={}).status_code, 422)
+        self.client.post("/api/connect")
+        self.idle()
+        device = self.app.state.service.device
+        payload = {"confirmation": "stop_and_exit"}
+        self.assertEqual(
+            self.client.post("/api/shutdown", json=payload).status_code, 202
+        )
+        future = self.app.state.service.shutdown_future
+        self.assertEqual(
+            self.client.post("/api/shutdown", json=payload).status_code, 202
+        )
+        self.assertIs(future, self.app.state.service.shutdown_future)
+        future.result(timeout=5)
+        state = self.client.get("/api/state").json()
+        self.assertEqual(state["shutdown_state"], "ready")
+        self.assertFalse(device.is_open)
+        self.assertEqual(self.client.post("/api/connect").status_code, 503)
+        self.app.state.service.close()
+        self.app.state.service.close()
+
+    def test_lan_is_disabled_by_default(self):
+        remote = TestClient(self.app, client=("192.168.50.20", 5000))
+        self.assertEqual(remote.get("/api/state").status_code, 403)
+
+    def test_lan_can_view_but_cannot_control_even_with_forwarded_headers(self):
+        with patch(
+            "telescopedaq.web.app.lan_addresses", return_value=["192.168.50.10"]
+        ):
+            app = create_app(self.config_path, self.workspace, demo=True, lan=True)
+        with TestClient(
+            app, client=("192.168.50.20", 5000), base_url="http://192.168.50.10"
+        ) as remote:
+            self.assertEqual(remote.get("/").status_code, 200)
+            self.assertTrue(remote.get("/api/state").json()["read_only"])
+            self.assertEqual(remote.get("/api/config").status_code, 200)
+            for path in (
+                "/api/connect",
+                "/api/run/start",
+                "/api/run/stop",
+                "/api/run/emergency",
+                "/api/scan/start",
+                "/api/shutdown",
+                "/api/root/upload",
+            ):
+                self.assertEqual(
+                    remote.post(
+                        path,
+                        json={},
+                        headers={
+                            "X-Forwarded-For": "127.0.0.1",
+                            "X-Real-IP": "127.0.0.1",
+                        },
+                    ).status_code,
+                    403,
+                    path,
+                )
+            self.assertEqual(remote.put("/api/config", json={}).status_code, 403)
+            public = TestClient(app, client=("203.0.113.20", 5000))
+            self.assertEqual(public.get("/").status_code, 403)
+            local = TestClient(app, client=("127.0.0.1", 5000))
+            self.assertFalse(local.get("/api/state").json()["read_only"])
+
+    def test_safe_exit_waits_for_read_and_flushes_all_accepted_waveforms(self):
+        started, release = threading.Event(), threading.Event()
+
+        class SlowRead(DemoDigitizer):
+            def read_events(self):
+                batch = super().read_events()
+                started.set()
+                release.wait(5)
+                return batch
+
+        self.app.state.service.factory = SlowRead
+        self.client.post("/api/run/start", json={"daq_mode": "write_only"})
+        self.assertTrue(started.wait(3))
+        try:
+            self.client.post("/api/shutdown", json={"confirmation": "stop_and_exit"})
+            self.assertEqual(
+                self.client.get("/api/state").json()["shutdown_state"], "stopping"
+            )
+            self.assertFalse(self.app.state.service.shutdown_future.done())
+        finally:
+            release.set()
+        self.app.state.service.shutdown_future.result(timeout=5)
+        state = self.client.get("/api/state").json()
+        self.assertEqual(state["shutdown_state"], "ready")
+        self.assertEqual(state["status"]["total_events"], 4)
+        with uproot.open(self.workspace / "output/demo/run_000001.root") as root:
+            self.assertEqual(root["events"].num_entries, 64)
+        self.assertEqual(state["status"]["written_events"], 64)
+        self.assertFalse(state["connected"])
+
+    def test_safe_exit_reports_cleanup_error_without_false_success(self):
+        class BadClose(DemoDigitizer):
+            def close(self):
+                super().close()
+                raise RuntimeError("USB close failed")
+
+        self.app.state.service.factory = BadClose
+        self.client.post("/api/connect")
+        self.idle()
+        self.client.post("/api/shutdown", json={"confirmation": "stop_and_exit"})
+        self.app.state.service.shutdown_future.result(timeout=5)
+        state = self.client.get("/api/state").json()
+        self.assertEqual(state["shutdown_state"], "error")
+        self.assertIn("USB close failed", state["shutdown_error"])
+        self.assertEqual(self.client.get("/api/logs").status_code, 200)
+
+    def test_safe_exit_during_failed_root_flush_stays_in_error(self):
+        started, release = threading.Event(), threading.Event()
+
+        class SlowRead(DemoDigitizer):
+            def read_events(self):
+                batch = super().read_events()
+                started.set()
+                release.wait(5)
+                return batch
+
+        self.app.state.service.factory = SlowRead
+        with patch(
+            "telescopedaq.root_writer.RootWriter.flush",
+            side_effect=OSError("Disk full"),
+        ):
+            self.client.post("/api/run/start", json={})
+            self.assertTrue(started.wait(3))
+            try:
+                self.client.post(
+                    "/api/shutdown", json={"confirmation": "stop_and_exit"}
+                )
+            finally:
+                release.set()
+            self.app.state.service.shutdown_future.result(timeout=5)
+        state = self.client.get("/api/state").json()
+        self.assertEqual(state["shutdown_state"], "error")
+        self.assertIn("Disk full", state["shutdown_error"])
+        self.assertEqual(self.client.get("/").status_code, 200)
 
     def test_multichannel_run_and_offline_reader_no_derived_data(self):
         self.assertEqual(

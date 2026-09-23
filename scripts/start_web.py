@@ -17,6 +17,11 @@ def main():
     )
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
+        "--lan",
+        action="store_true",
+        help="Allow read-only viewing from private IPv4 networks; control remains local",
+    )
+    parser.add_argument(
         "--demo", action="store_true", help="Synthetic source, no CAEN access"
     )
     args = parser.parse_args()
@@ -27,12 +32,15 @@ def main():
     )
     from telescopedaq.web.app import create_app
     import uvicorn
+    from telescopedaq.web.network import lan_addresses
 
     # One process owns the hardware. Never use reload or multiple Uvicorn workers.
     listener = socket.socket()
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
     for port in range(args.port, min(args.port + 20, 65536)):
         try:
-            listener.bind(("127.0.0.1", port))
+            listener.bind(("0.0.0.0" if args.lan else "127.0.0.1", port))
             break
         except OSError:
             continue
@@ -42,11 +50,28 @@ def main():
     logging.info(
         "TelescopeDAQ%s: http://127.0.0.1:%d", " DEMO" if args.demo else "", port
     )
+    if args.lan:
+        for ip in lan_addresses():
+            logging.info("LAN viewer (read-only): http://%s:%d", ip, port)
+        logging.warning(
+            "LAN has no authentication or TLS. Use a trusted private network only; do not expose to Internet"
+        )
     try:
+
+        def stop_server():
+            server.should_exit = True
+
         server = uvicorn.Server(
             uvicorn.Config(
-                create_app(args.config, PROJECT, args.demo),
+                create_app(
+                    args.config,
+                    PROJECT,
+                    args.demo,
+                    on_shutdown=stop_server,
+                    lan=args.lan,
+                ),
                 access_log=False,
+                proxy_headers=False,
                 log_level="info",
             )
         )

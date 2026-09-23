@@ -14,6 +14,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
 
 import numpy as np
+import uproot
 import uvicorn
 import yaml
 from playwright.sync_api import expect, sync_playwright
@@ -31,8 +32,8 @@ def main():
         help="Path to a Chromium-based browser; otherwise Playwright Chromium",
     )
     args = parser.parse_args()
-    artifacts = PROJECT / "artifacts"
-    artifacts.mkdir(exist_ok=True)
+    artifacts = PROJECT / "artifacts" / ("web-ui-" + str(time.time_ns()))
+    artifacts.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=artifacts) as temporary:
         workspace = Path(temporary)
         data = load_config(PROJECT / "configs/channel0_generator_test.yaml").data
@@ -57,7 +58,12 @@ def main():
         url = f"http://127.0.0.1:{listener.getsockname()[1]}"
         server = uvicorn.Server(
             uvicorn.Config(
-                create_app(config, workspace, demo=True),
+                create_app(
+                    config,
+                    workspace,
+                    demo=True,
+                    on_shutdown=lambda: setattr(server, "should_exit", True),
+                ),
                 log_level="warning",
                 access_log=False,
             )
@@ -80,6 +86,26 @@ def main():
                 page.on("pageerror", lambda exc: errors.append(str(exc)))
                 page.goto(url)
                 expect(page.locator("#settings-status")).to_have_text("Settings saved")
+                # UI policy check; real peer-address authorization is covered by test_web.
+                viewer = browser.new_page(viewport={"width": 1440, "height": 1050})
+
+                def read_only_state(route):
+                    response = route.fetch()
+                    state = response.json()
+                    state.update(read_only=True, lan_enabled=True)
+                    route.fulfill(response=response, json=state)
+
+                viewer.route("**/api/state", read_only_state)
+                viewer.goto(url)
+                expect(viewer.locator("#access-mode")).to_be_visible()
+                for control in ("connect", "start", "safe-exit", "root-upload"):
+                    expect(viewer.locator("#" + control)).to_be_disabled()
+                viewer.locator('nav [data-view="settings"]').click()
+                expect(viewer.locator('[name="caen.dc_offset"]')).to_be_disabled()
+                viewer.screenshot(
+                    path=str(artifacts / "web-lan-viewer.png"), full_page=True
+                )
+                viewer.close()
                 page.locator("#connect").click()
                 expect(page.locator("#state")).to_have_text("connected")
                 page.locator("#disconnect").click()
@@ -188,10 +214,37 @@ def main():
                     page.screenshot(
                         path=str(artifacts / f"web-{view}-mobile.png"), full_page=True
                     )
+                page.locator('nav [data-view="settings"]').click()
+                page.locator('[name="run.run_id"]').fill("3")
+                expect(page.locator("#save-settings")).to_be_enabled()
+                page.locator("#save-settings").click()
+                expect(page.locator("#settings-status")).to_have_text("Settings saved")
+                page.locator('nav [data-view="run"]').click()
+                page.locator("#start").click()
+                expect(page.locator("#state")).to_have_text("running")
+                page.wait_for_timeout(1100)
+                page.locator("#safe-exit").click()
+                page.locator("#cancel-exit").click()
+                expect(page.locator("#state")).to_have_text("running")
+                page.locator("#safe-exit").click()
+                page.locator("#confirm-exit").click()
+                expect(page.locator("#exit-status")).to_contain_text(
+                    "Files closed", timeout=10000
+                )
+                page.screenshot(
+                    path=str(artifacts / "web-safe-exit-mobile.png"), full_page=True
+                )
+                thread.join(10)
+                assert not thread.is_alive(), (
+                    "Safe Exit did not terminate the HTTP server"
+                )
+                with uproot.open(workspace / "output/demo/run_000003.root") as root:
+                    assert root["events"].num_entries > 0
+                    assert root["events"].num_entries % 16 == 0
                 assert not errors, errors
                 browser.close()
                 print(
-                    f"PASS: browser controls, acquisition/viewer isolation, 16 channels, pause, Write Only, scan, upload, mobile. Canvas: {pixels} painted pixels."
+                    f"PASS: browser controls, acquisition/viewer isolation, 16 channels, pause, Write Only, scan, upload, mobile, LAN read-only UI, Safe Exit and ROOT finalization. Canvas: {pixels} painted pixels."
                 )
         finally:
             server.should_exit = True

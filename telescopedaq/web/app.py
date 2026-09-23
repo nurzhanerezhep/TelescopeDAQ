@@ -18,6 +18,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .service import DAQService, BusyError
 from . import offline
+from .network import lan_addresses, local_client, private_client
 
 STATIC = Path(__file__).parent / "static"
 LOG = logging.getLogger(__name__)
@@ -33,6 +34,10 @@ class RunRequest(BaseModel):
     trigger_mode: Literal["threshold", "external", "periodic"] = "threshold"
 
 
+class ShutdownRequest(BaseModel):
+    confirmation: Literal["stop_and_exit"]
+
+
 class ScanRequest(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False)
     lower: int = Field(1800, ge=0, le=4095, strict=True)
@@ -42,7 +47,14 @@ class ScanRequest(BaseModel):
     max_events: int = Field(100000, ge=1, le=10000000, strict=True)
 
 
-def create_app(config_path=None, workspace=None, demo=False, factory=None):
+def create_app(
+    config_path=None,
+    workspace=None,
+    demo=False,
+    factory=None,
+    on_shutdown=None,
+    lan=False,
+):
     workspace = Path(workspace or Path.cwd()).resolve()
     config_path = Path(
         config_path or workspace / "configs/channel0_generator_test.yaml"
@@ -77,13 +89,32 @@ def create_app(config_path=None, workspace=None, demo=False, factory=None):
                 handler.close()
 
     app = FastAPI(title="TelescopeDAQ", version="0.3.0", lifespan=lifespan)
+    app.state.shutdown_task = None
     app.add_middleware(
         TrustedHostMiddleware,
-        allowed_hosts=["127.0.0.1", "localhost", "[::1]", "testserver"],
+        allowed_hosts=["127.0.0.1", "localhost", "[::1]", "testserver"]
+        + (lan_addresses() if lan else []),
     )
 
     @app.middleware("http")
     async def local_requests(request: Request, call_next):
+        peer = request.client.host if request.client else ""
+        local = local_client(peer)
+        if not local:
+            if not lan or not private_client(peer):
+                return JSONResponse(
+                    {
+                        "detail": "LAN viewing is disabled or client is not on a private network"
+                    },
+                    status_code=403,
+                )
+            if request.method not in ("GET", "HEAD"):
+                return JSONResponse(
+                    {
+                        "detail": "LAN is read-only. Control DAQ on the acquisition computer using 127.0.0.1"
+                    },
+                    status_code=403,
+                )
         origin = request.headers.get("origin")
         if request.method not in ("GET", "HEAD") and origin:
             if urlsplit(origin).netloc != request.headers.get("host"):
@@ -91,6 +122,17 @@ def create_app(config_path=None, workspace=None, demo=False, factory=None):
                     {"detail": "Cross-origin control is disabled"}, status_code=403
                 )
         try:
+            service = getattr(app.state, "service", None)
+            if (
+                service is not None
+                and service.closed
+                and request.method not in ("GET", "HEAD")
+                and request.url.path != "/api/shutdown"
+            ):
+                return JSONResponse(
+                    {"detail": "Safe exit in progress; new operations are disabled"},
+                    status_code=503,
+                )
             response = await call_next(request)
             response.headers["X-Content-Type-Options"] = "nosniff"
             response.headers["Cache-Control"] = (
@@ -121,8 +163,29 @@ def create_app(config_path=None, workspace=None, demo=False, factory=None):
         return FileResponse(STATIC / "index.html")
 
     @app.get("/api/state")
-    def state():
-        return service().snapshot()
+    def state(request: Request):
+        return {
+            **service().snapshot(),
+            "read_only": not local_client(
+                request.client.host if request.client else ""
+            ),
+            "lan_enabled": lan,
+        }
+
+    @app.post("/api/shutdown", status_code=202)
+    async def shutdown(payload: ShutdownRequest):
+        future = service().request_shutdown()
+
+        async def finish():
+            await asyncio.shield(asyncio.wrap_future(future))
+            if service().shutdown_state == "ready" and on_shutdown is not None:
+                # Allow the browser to observe successful cleanup before closing HTTP.
+                await asyncio.sleep(1.5)
+                on_shutdown()
+
+        if app.state.shutdown_task is None:
+            app.state.shutdown_task = asyncio.create_task(finish())
+        return {"accepted": True, "shutdown_state": service().shutdown_state}
 
     @app.get("/api/logs")
     def logs(after: int = 0):
